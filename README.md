@@ -68,7 +68,7 @@ package myproc
 
 import (
     "context"
-    "powerjob-client-go/processor"
+    "github.com/mengeric/powerjob-client-go/processor"
 )
 
 // DemoProcessor 示例：等待一段时间并返回成功
@@ -93,7 +93,7 @@ func init() { processor.Register("demo", &DemoProcessor{}) }
 import (
     "gorm.io/gorm"
     "gorm.io/driver/mysql"
-    "powerjob-client-go/storage/gormstore"
+    "github.com/mengeric/powerjob-client-go/storage/gormstore"
 )
 
 // 初始化 GORM
@@ -121,7 +121,7 @@ import (
     "context"
     "net/http"
     "time"
-    "powerjob-client-go/powerjob"
+    "github.com/mengeric/powerjob-client-go/powerjob"
 )
 
 store := /* 见上 */

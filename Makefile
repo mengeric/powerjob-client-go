@@ -33,4 +33,4 @@ cover:
 mock: tools
 	@MOCK=$$(which mockgen 2>/dev/null || echo bin/mockgen); \
 	GOMODCACHE=$$(pwd)/.gomodcache GOPATH=$$(pwd)/.gopath $$MOCK -destination=mocks/mock_serverapi.go -package=mocks \
-		powerjob-client-go/client ServerAPI
+		github.com/mengeric/powerjob-client-go/client ServerAPI
