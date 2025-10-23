@@ -1,0 +1,16 @@
+# Binaries and build outputs
+bin/
+dist/
+coverage.out
+
+# Go modules and vendors
+vendor/
+
+# IDE/editor
+.idea/
+.vscode/
+*.iml
+.gomodcache/
+.gopath/
+# MacOS
+.DS_Store
