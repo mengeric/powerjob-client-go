@@ -46,10 +46,10 @@ func (r *InstanceReporter) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 				list, err := r.repo.ListRunning(ctx)
-				if err != nil {
-					logging.L().Warn(ctx, "list running failed", "err", err)
-					continue
-				}
+                if err != nil {
+                    logging.L().Warnf(ctx, "list running failed: %v", err)
+                    continue
+                }
 				for _, it := range list {
 					req := client.TaskTrackerReportInstanceStatusReq{
 						JobID:          it.JobID,
@@ -58,9 +58,9 @@ func (r *InstanceReporter) Start(ctx context.Context) {
 						SourceAddress:  r.worker,
 						InstanceStatus: it.Status,
 					}
-					if err := r.api.ReportInstanceStatus(ctx, r.disc.Get(), req); err != nil {
-						logging.L().Warn(ctx, "report instance failed", "iid", it.InstanceID, "err", err)
-					}
+                    if err := r.api.ReportInstanceStatus(ctx, r.disc.Get(), req); err != nil {
+                        logging.L().Warnf(ctx, "report instance failed: iid=%d err=%v", it.InstanceID, err)
+                    }
 				}
 			}
 		}

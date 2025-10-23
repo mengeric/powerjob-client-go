@@ -1,9 +1,9 @@
 package processor
 
 import (
-    "context"
-    "errors"
-    "sync"
+	"context"
+	"errors"
+	"sync"
 )
 
 // Result 处理器执行结果。
@@ -13,10 +13,16 @@ type Result struct {
 }
 
 // Processor 统一处理器接口。
-// 功能：执行业务逻辑；Stop 用于响应停止。
+// 功能：执行业务逻辑；Stop 用于响应停止；GetTaskKey 返回控制台配置的 processorInfo。
+// 约定：GetTaskKey() 的返回值必须与控制台中的 processorInfo 完全一致（区分大小写）。
 type Processor interface {
+    // GetTaskKey 返回该处理器的唯一键（即控制台 processorInfo）。
+    GetTaskKey() string
+    // Init 初始化钩子，可选。
     Init(ctx context.Context) error
+    // Run 执行业务，raw 为原始 JSON 字节，请自行绑定到强类型。
     Run(ctx context.Context, raw []byte) (Result, error)
+    // Stop 停止钩子，接收取消通知后进行清理。
     Stop(ctx context.Context) error
 }
 
@@ -26,12 +32,22 @@ type Processor interface {
 type TypedProcessor[S any] interface{}
 
 var (
-	regMu      sync.RWMutex
-	processors = map[string]Processor{}
+    regMu      sync.RWMutex
+    processors = map[string]Processor{}
 )
 
 // Register 注册处理器。
-func Register(name string, p Processor) { regMu.Lock(); defer regMu.Unlock(); processors[name] = p }
+// 功能：使用 p.GetTaskKey() 作为键，不再需要额外传入名称，避免人为不一致。
+// 注意：若 key 为空将 panic；重复注册将覆盖旧值（请自行避免）。
+func Register(p Processor) {
+    key := p.GetTaskKey()
+    if key == "" {
+        panic("processor.GetTaskKey() must not be empty")
+    }
+    regMu.Lock()
+    processors[key] = p
+    regMu.Unlock()
+}
 
 // Get 获取处理器。
 func Get(name string) (Processor, bool) {
@@ -44,8 +60,8 @@ func Get(name string) (Processor, bool) {
 // ErrNotFound 处理器不存在错误。
 var ErrNotFound = errors.New("processor not found")
 
-// RegisterTyped 使用泛型注册强类型处理器，内部自动完成 JSON → S 绑定。
-func RegisterTyped[S any](name string, p TypedProcessor[S]) { panic("TypedProcessor removed; use Processor with []byte and decode yourself") }
+// RegisterTyped 已移除：请直接实现 Processor + GetTaskKey，在 Run 中自行解码 raw。
+func RegisterTyped[S any](name string, p TypedProcessor[S]) { panic("TypedProcessor removed; implement Processor + GetTaskKey and decode raw yourself") }
 
 // typedAdapter 将 TypedProcessor[S] 适配为旧 Processor 接口，便于 Worker 统一调用路径。
 type typedAdapter[S any] struct{}

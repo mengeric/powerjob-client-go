@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -64,17 +63,20 @@ func (s *memStore) ListRunning(ctx context.Context) ([]InstanceRecord, error) {
 // dummyAPI 仅为使 NewWorker 构造成功，测试不发起外部请求。
 type dummyAPI struct{ client.ServerAPI }
 
+func (d *dummyAPI) AssertApp(ctx context.Context, host, app string) (int64, error) { return 1, nil }
+
 func TestWorkerHTTP_RunJobFlow(t *testing.T) {
 	Convey("worker runJob -> succeed", t, func() {
-		w := NewWorker(&memStore{}, Options{BootstrapServer: "x", AppName: "demo", WorkerAddress: "127.0.0.1:27777"}, &dummyAPI{})
-		mux := http.NewServeMux()
-		w.MountHTTP(mux, "/worker")
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
+		w := NewWorker(WithBootstrapServer("x"), WithAppName("demo"), WithListenAddr("127.0.0.1:0"), WithClientAPI(&dummyAPI{}))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Start(ctx)
+		time.Sleep(50 * time.Millisecond)
+		addr := w.Addr()
 
 		req := client.ServerScheduleJobReq{InstanceID: 1, JobID: 7, ProcessorInfo: "simple", JobParams: `{"sleepMS": 10}`}
 		b, _ := json.Marshal(req)
-		resp, err := http.Post(srv.URL+"/worker/runJob", "application/json", bytes.NewReader(b))
+		resp, err := http.Post("http://"+addr+"/worker/runJob", "application/json", bytes.NewReader(b))
 		So(err, ShouldBeNil)
 		So(resp.StatusCode, ShouldEqual, 200)
 
@@ -82,7 +84,7 @@ func TestWorkerHTTP_RunJobFlow(t *testing.T) {
 		time.Sleep(40 * time.Millisecond)
 		// 查询状态
 		qb, _ := json.Marshal(map[string]any{"instanceId": 1})
-		qr, err := http.Post(srv.URL+"/worker/queryInstanceStatus", "application/json", bytes.NewReader(qb))
+		qr, err := http.Post("http://"+addr+"/worker/queryInstanceStatus", "application/json", bytes.NewReader(qb))
 		So(err, ShouldBeNil)
 		So(qr.StatusCode, ShouldEqual, 200)
 	})

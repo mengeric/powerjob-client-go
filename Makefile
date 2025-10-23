@@ -25,7 +25,7 @@ build:
 	$(GO) build $(PKG)
 
 test:
-	$(GO) test -race -cover -coverprofile=coverage.out $(PKG)
+	GOMODCACHE=$$(pwd)/.gomodcache GOPATH=$$(pwd)/.gopath $(GO) test -race -cover -coverprofile=coverage.out $(PKG)
 
 cover:
 	$(GO) tool cover -func=coverage.out

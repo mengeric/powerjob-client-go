@@ -121,7 +121,7 @@ func (h *httpServerAPI) post(ctx context.Context, u string, body any, out any) e
 
 // SafeLogErr 打印但不打断流程。
 func SafeLogErr(err error, msg string) {
-	if err != nil {
-		logging.L().Error(context.Background(), msg, "err", err)
-	}
+    if err != nil {
+        logging.L().Errorf(context.Background(), "%s: %v", msg, err)
+    }
 }

@@ -42,10 +42,10 @@ func (d *Discovery) Start(ctx context.Context) {
 			case <-ticker.C:
 				cur := d.Get()
 				addr, err := d.api.Acquire(ctx, d.bootstrap, d.appID, cur, d.version)
-				if err != nil {
-					logging.L().Warn(ctx, "acquire server failed", "err", err)
-					continue
-				}
+                if err != nil {
+                    logging.L().Warnf(ctx, "acquire server failed: %v", err)
+                    continue
+                }
 				if addr != "" {
 					d.current.Store(addr)
 				}

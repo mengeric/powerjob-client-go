@@ -40,9 +40,9 @@ func (h *HeartbeatScheduler) Start(ctx context.Context) {
 					Protocol:      "HTTP",
 					SystemMetrics: metrics.CollectSystemMetric(ctx),
 				}
-				if err := h.api.Heartbeat(ctx, h.disc.Get(), hb); err != nil {
-					logging.L().Warn(ctx, "heartbeat failed", "err", err)
-				}
+                if err := h.api.Heartbeat(ctx, h.disc.Get(), hb); err != nil {
+                    logging.L().Warnf(ctx, "heartbeat failed: %v", err)
+                }
 			}
 		}
 	}()

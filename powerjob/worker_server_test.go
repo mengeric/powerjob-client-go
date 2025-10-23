@@ -62,15 +62,17 @@ func (s *memStore3) ListRunning(ctx context.Context) ([]InstanceRecord, error) {
 
 type dummyAPI3 struct{ client.ServerAPI }
 
-func TestWorker_StartHTTP(t *testing.T) {
-	Convey("StartHTTP should listen and handle requests on random port", t, func() {
-		w := NewWorker(&memStore3{}, Options{BootstrapServer: "x", AppName: "demo", WorkerAddress: "127.0.0.1:0"}, &dummyAPI3{})
+func (d *dummyAPI3) AssertApp(ctx context.Context, host, app string) (int64, error) { return 1, nil }
+
+func TestWorker_Start(t *testing.T) {
+	Convey("Start should listen and handle requests on random port", t, func() {
+		w := NewWorker(WithBootstrapServer("x"), WithAppName("demo"), WithListenAddr("127.0.0.1:0"), WithClientAPI(&dummyAPI3{}))
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		_, addr, err := w.StartHTTP(ctx, "127.0.0.1:0", "/worker")
-		So(err, ShouldBeNil)
+		go w.Start(ctx)
+		time.Sleep(50 * time.Millisecond)
+		addr := w.Addr()
 		So(addr, ShouldNotEqual, "")
-		time.Sleep(20 * time.Millisecond)
 		// 调用 runJob
 		req := client.ServerScheduleJobReq{InstanceID: 3, JobID: 7, ProcessorInfo: "simple", JobParams: `{"sleepMS": 10}`}
 		b, _ := json.Marshal(req)

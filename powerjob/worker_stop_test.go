@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -63,27 +62,30 @@ func (s *memStore2) ListRunning(ctx context.Context) ([]InstanceRecord, error) {
 
 type dummyAPI2 struct{ client.ServerAPI }
 
+func (d *dummyAPI2) AssertApp(ctx context.Context, host, app string) (int64, error) { return 1, nil }
+
 func TestWorker_StopInstance(t *testing.T) {
 	Convey("stopInstance should cancel running job", t, func() {
-		w := NewWorker(&memStore2{}, Options{BootstrapServer: "x", AppName: "demo", WorkerAddress: "127.0.0.1:27777"}, &dummyAPI2{})
-		mux := http.NewServeMux()
-		w.MountHTTP(mux, "/worker")
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
+		w := NewWorker(withStore(&memStore2{}), WithBootstrapServer("x"), WithAppName("demo"), WithListenAddr("127.0.0.1:0"), WithClientAPI(&dummyAPI2{}))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Start(ctx)
+		time.Sleep(50 * time.Millisecond)
+		addr := w.Addr()
 
 		// 启动一个较长的任务
 		req := client.ServerScheduleJobReq{InstanceID: 2, JobID: 7, ProcessorInfo: "simple", JobParams: `{"sleepMS": 500}`}
 		b, _ := json.Marshal(req)
-		_, _ = http.Post(srv.URL+"/worker/runJob", "application/json", bytes.NewReader(b))
+		_, _ = http.Post("http://"+addr+"/worker/runJob", "application/json", bytes.NewReader(b))
 
 		// 立即下发停止
 		sb, _ := json.Marshal(map[string]any{"instanceId": 2})
-		_, _ = http.Post(srv.URL+"/worker/stopInstance", "application/json", bytes.NewReader(sb))
+		_, _ = http.Post("http://"+addr+"/worker/stopInstance", "application/json", bytes.NewReader(sb))
 
 		// 等待一小会，查询应非 Running
 		time.Sleep(120 * time.Millisecond)
 		qb, _ := json.Marshal(map[string]any{"instanceId": 2})
-		qr, err := http.Post(srv.URL+"/worker/queryInstanceStatus", "application/json", bytes.NewReader(qb))
+		qr, err := http.Post("http://"+addr+"/worker/queryInstanceStatus", "application/json", bytes.NewReader(qb))
 		So(err, ShouldBeNil)
 		So(qr.StatusCode, ShouldEqual, 200)
 	})
