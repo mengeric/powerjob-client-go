@@ -29,7 +29,7 @@ type InstanceRecord struct {
 	UpdatedAt  time.Time
 }
 
-// Storage 持久化接口（可由宿主实现或使用内置 gormstore）。
+// Storage 持久化接口（默认提供内存实现 memstore，生产可自行替换）。
 type Storage interface {
 	// Upsert 插入或更新实例记录。
 	Upsert(ctx context.Context, rec *InstanceRecord) error

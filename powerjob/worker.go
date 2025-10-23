@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"time"
 
+	"net"
+	"os"
+
 	"github.com/mengeric/powerjob-client-go/client"
 	"github.com/mengeric/powerjob-client-go/logging"
 	"github.com/mengeric/powerjob-client-go/processor"
@@ -22,8 +25,9 @@ type Worker struct {
 
 	trk  *tracker.Manager
 	disc *scheduler.Discovery
-	hb   *scheduler.HeartbeatScheduler
-	rep  *scheduler.InstanceReporter
+    hb   *scheduler.HeartbeatScheduler
+    rep  *scheduler.InstanceReporter
+    lr   *scheduler.LogReporter
 }
 
 // NewWorker 创建 Worker。
@@ -56,8 +60,11 @@ func (w *Worker) Start(ctx context.Context) {
 	w.hb = scheduler.NewHeartbeat(w.api, w.disc, w.opt.WorkerAddress, int(w.opt.HeartbeatEvery.Seconds()))
 	w.hb.Start(ctx)
 
-	w.rep = scheduler.NewReporter(w.api, w.disc, listerAdapter{w.store}, w.opt.WorkerAddress, int(w.opt.ReportEvery.Seconds()))
-	w.rep.Start(ctx)
+    w.rep = scheduler.NewReporter(w.api, w.disc, listerAdapter{w.store}, w.opt.WorkerAddress, int(w.opt.ReportEvery.Seconds()))
+    w.rep.Start(ctx)
+
+    w.lr = scheduler.NewLogReporter(w.api, w.disc, w.opt.WorkerAddress, int(w.opt.LogReportEvery.Seconds()), w.opt.LogBatchSize)
+    w.lr.Start(ctx)
 }
 
 // MountHTTP 将组件的 HTTP 路由挂载到宿主 mux，base 前缀默认为 /worker。
@@ -69,6 +76,63 @@ func (w *Worker) MountHTTP(mux *http.ServeMux, base string) {
 	mux.HandleFunc(base+"/runJob", w.handleRunJob)
 	mux.HandleFunc(base+"/stopInstance", w.handleStopInstance)
 	mux.HandleFunc(base+"/queryInstanceStatus", w.handleQueryInstanceStatus)
+}
+
+// StartHTTP 创建并启动一个内置的 HTTP Server，监听指定地址并挂载组件路由。
+// 功能：快速把组件跑起来，宿主无需自行创建 http.Server。
+// 参数：
+//   - ctx: 控制生命周期，ctx.Done() 时将优雅关闭；
+//   - addr: 监听地址，支持形如 ":27777"、"127.0.0.1:0"（0 表示随机端口）；
+//   - base: 路由前缀，留空默认 "/worker"。
+//
+// 返回：
+//   - srv: *http.Server 实例，便于观察状态；
+//   - actualAddr: 实际监听地址（当传入 :0 时用于获取随机端口）；
+//   - err: 启动失败时返回错误。
+func (w *Worker) StartHTTP(ctx context.Context, addr, base string) (srv *http.Server, actualAddr string, err error) {
+	if base == "" {
+		base = "/worker"
+	}
+	mux := http.NewServeMux()
+	w.MountHTTP(mux, base)
+
+	// 处理 :0 随机端口以便拿到实际端口
+	ln, lerr := net.Listen("tcp", addr)
+	if lerr != nil {
+		return nil, "", lerr
+	}
+	actualAddr = ln.Addr().String()
+
+	srv = &http.Server{Addr: actualAddr, Handler: mux}
+	go func() {
+		// 当 ctx 结束时优雅关闭
+		<-ctx.Done()
+		_ = srv.Shutdown(context.Background())
+	}()
+	go func() { _ = srv.Serve(ln) }()
+	return srv, actualAddr, nil
+}
+
+// StartHTTPWithSignals 创建并启动 HTTP Server（携带系统信号监听）。
+// 功能：等价于 WithSignalCancel(context.Background()) + StartHTTP(...) 的组合，便于快速接入优雅关闭。
+// 参数：
+//   - addr：监听地址；
+//   - base：路由前缀；
+//   - sigs：可选信号列表，留空默认 SIGINT、SIGTERM。
+//
+// 返回：
+//   - srv：*http.Server；
+//   - actualAddr：实际监听地址；
+//   - stop：释放 signal 监听的函数（通常 defer stop()）；
+//   - err：错误。
+func (w *Worker) StartHTTPWithSignals(addr, base string, sigs ...os.Signal) (srv *http.Server, actualAddr string, stop context.CancelFunc, err error) {
+	ctx, cancel := WithSignalCancel(context.Background(), sigs...)
+	s, a, e := w.StartHTTP(ctx, addr, base)
+	if e != nil {
+		cancel()
+		return nil, "", nil, e
+	}
+	return s, a, cancel, nil
 }
 
 // handleRunJob 任务执行入口（Server -> Worker）。
@@ -96,17 +160,22 @@ func (w *Worker) execute(ctx context.Context, req client.ServerScheduleJobReq, i
 		w.trk.Stop(req.InstanceID)
 		return
 	}
-	params := map[string]any{}
-	if len(req.JobParams) > 0 {
-		_ = json.Unmarshal([]byte(req.JobParams), &params)
-	}
-	res, err := p.Run(ins.Ctx, params)
+    // 直接把原始 JSON 字节传给处理器，由处理器自行解码
+    res, err := p.Run(ins.Ctx, []byte(req.JobParams))
 	if err != nil {
 		_ = w.store.UpdateStatus(context.Background(), req.InstanceID, StateFailed, res.Code, err.Error())
 	} else {
 		_ = w.store.UpdateStatus(context.Background(), req.InstanceID, StateSucceed, res.Code, res.Msg)
 	}
 	w.trk.Stop(req.InstanceID)
+}
+
+// Log 推送一条在线日志（供处理器或业务调用）。
+// level: 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR；timeMs：日志时间（毫秒）。
+func (w *Worker) Log(instanceID int64, level int, content string, timeMs int64) {
+    if w.lr == nil { return }
+    if timeMs == 0 { timeMs = time.Now().UnixMilli() }
+    w.lr.Enqueue(client.InstanceLogContent{InstanceID: instanceID, LogContent: content, LogLevel: level, LogTime: timeMs})
 }
 
 // handleStopInstance 停止实例执行。

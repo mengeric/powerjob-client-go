@@ -7,6 +7,26 @@ powerjob-client-go（组件版）
 - 依赖：标准库 + GORM 可选（用于示例存储实现）
 - 日志：提供简单日志门面，可替换
 
+安装
+----
+
+使用 Go 1.24.3 及以上版本，直接在你的项目中执行：
+
+```
+go get github.com/mengeric/powerjob-client-go
+```
+
+随后在代码中按需导入：
+
+```
+import (
+  "github.com/mengeric/powerjob-client-go/powerjob"
+  "github.com/mengeric/powerjob-client-go/processor"
+  "github.com/mengeric/powerjob-client-go/client"
+  // ...
+)
+```
+
 一、架构概览
 ------------
 
@@ -18,14 +38,13 @@ powerjob-client-go（组件版）
   - Worker：组件主体，提供
     - MountHTTP(mux, base)：把 /worker/* Handler 挂载到宿主路由
     - Start(ctx)：启动服务发现/心跳/实例状态上报等后台循环
-- internal
-  - client：与 PowerJob-Server 通讯（/server/assert、/server/acquire、心跳与上报）
-  - scheduler：服务发现、心跳、实例状态上报定时任务
-  - processor：业务处理器接口与注册表（示例 simple）
-  - worker/tracker：本地实例生命周期跟踪
-  - logging：日志门面（默认 slog，可替换）
-- storage
-  - gormstore：基于 GORM 的 Storage 实现（可选）
+ - client：与 PowerJob-Server 通讯（/server/assert、/server/acquire、心跳与上报）
+ - scheduler：服务发现、心跳、实例状态上报定时任务
+ - metrics：系统指标采集（基于 gopsutil）
+ - processor：业务处理器接口与注册表（示例 simple）
+ - tracker：本地实例生命周期跟踪
+ - logging：日志门面（默认 slog，可替换）
+ - storage/memstore：内存实现（默认推荐给开发/轻量场景）
 
 数据流（简化）：
 - Server → Worker：POST /worker/runJob 触发本地 Processor 执行；/worker/stopInstance 请求停止；/worker/queryInstanceStatus 查询状态
@@ -46,22 +65,16 @@ powerjob-client-go（组件版）
 ├─ logging/                # 日志门面
 ├─ processor/              # 处理器接口与示例
 ├─ tracker/                # 实例跟踪器
-├─ storage/gormstore/      # 可选：GORM 持久化实现
+├─ storage/memstore/       # 默认：内存存储实现
 ├─ etc/worker.yaml         # 示例配置（仅参考）
 ├─ Makefile                # build/test/mocks
 └─ README.md
 ```
 
-三、快速开始（集成到你的宿主服务）
-----------------------------
+快速开始（推荐：StartHTTP）
+-------------------------
 
-1) 安装依赖
-
-```
-go get gorm.io/gorm gorm.io/driver/mysql
-```
-
-2) （可选）注册你的业务处理器
+1) （可选）注册你的业务处理器
 
 ```go
 package myproc
@@ -85,26 +98,29 @@ func (d *DemoProcessor) Stop(ctx context.Context) error { return nil }
 func init() { processor.Register("demo", &DemoProcessor{}) }
 ```
 
-3) 实现/选择 Storage（两种方式）
+接入模式（明确标注）
+------------------
 
-- 方式 A：使用内置 GORM 存储
+- 推荐模式（组件自起 HTTP Server）
+  - 使用 `powerjob.Worker.StartHTTP(ctx, addr, base)`，一行代码起服务，适合新项目或无需复用现有 HTTP 栈的场景。
+  - 示例：`_, addr, err := w.StartHTTP(ctx, ":27777", "/worker")`。
+- 高级模式（挂载 Handler 到宿主 Server）
+  - 使用 `powerjob.Worker.MountHTTP(mux, base)`，当你的宿主已经有统一网关/鉴权/限流中间件，需要与现有路由融合时使用。
+  - 示例：`w.MountHTTP(mux, "/worker")` 然后 `http.ListenAndServe(...)`。
+
+注意：两种方式二选一即可；文档优先展示 StartHTTP。若确需自管 Server（如接入统一中间件/链路追踪），才使用 MountHTTP。
+
+2) 选择 Storage（默认内存）
+
+- 默认：使用内置内存存储
 
 ```go
-import (
-    "gorm.io/gorm"
-    "gorm.io/driver/mysql"
-    "github.com/mengeric/powerjob-client-go/storage/gormstore"
-)
+import "github.com/mengeric/powerjob-client-go/storage/memstore"
 
-// 初始化 GORM
-dsn := "user:pass@tcp(127.0.0.1:3306)/powerjob_go?charset=utf8mb4&parseTime=true&loc=Local"
-db, _ := gorm.Open(mysql.Open(dsn), &gorm.Config{})
-// 迁移表结构（建议复制 gormstore 的 model 字段创建同构结构）
-db.AutoMigrate(&struct{ /* 建议复制 gormstore 的 model 字段 */ }{})
-store := gormstore.New(db)
+store := memstore.New()
 ```
 
-- 方式 B：实现自定义存储（示例）
+- 或实现自定义存储（示例）
 
 ```go
 type MyStore struct{}
@@ -114,7 +130,7 @@ func (s *MyStore) Get(ctx context.Context, id int64) (*powerjob.InstanceRecord, 
 func (s *MyStore) ListRunning(ctx context.Context) ([]powerjob.InstanceRecord, error) { /*...*/ return nil, nil }
 ```
 
-4) 组装 Worker 并挂载到宿主 HTTP Server
+3) 启动 Worker + 内置 HTTP Server（或挂载到宿主）
 
 ```go
 import (
@@ -135,24 +151,32 @@ opt := powerjob.Options{
     DiscoveryEvery:   30 * time.Second,
 }
 
-w := powerjob.NewWorker(store, opt, nil) // 第三个参数为自定义 ServerAPI，nil 使用默认 HTTP 实现
-
-// 后台任务（服务发现/心跳/上报）
+w := powerjob.NewWorker(store, opt, nil)
 ctx, cancel := context.WithCancel(context.Background())
-go w.Start(ctx)
 defer cancel()
 
-// 挂载组件提供的 Handler
-mux := http.NewServeMux()
-w.MountHTTP(mux, "/worker")
+// 后台任务（服务发现/心跳/上报）
+go w.Start(ctx)
 
-http.ListenAndServe(":27777", mux)
+// 方案 A：已有 ctx（可由 WithSignalCancel 注入信号）
+_, addr, err := w.StartHTTP(ctx, ":27777", "/worker")
+if err != nil { panic(err) }
+println("listening:", addr)
+
+// 方案 B：一行式携带系统信号（SIGINT/SIGTERM）
+// srv, addr, stop, err := w.StartHTTPWithSignals(":27777", "/worker")
+// defer stop()
+
+// 高级：如需挂载到宿主 mux
+// mux := http.NewServeMux()
+// w.MountHTTP(mux, "/worker")
+// http.ListenAndServe(":27777", mux)
 ```
 
-> 提示：组件不持有或创建 HTTP Server，端口与生命周期完全由宿主控制。
+> 提示：组件既支持自起 HTTP Server（StartHTTP），也支持将 Handler 挂载到宿主 Server（MountHTTP）。如无特殊需要，推荐使用 StartHTTP。
 
 四、HTTP 接口（由组件提供）
-----------------------
+---------------------
 
 - POST /worker/runJob
   - 请求体：ServerScheduleJobReq（参见 client/types.go）
@@ -163,6 +187,12 @@ http.ListenAndServe(":27777", mux)
 - POST /worker/queryInstanceStatus
   - 请求体：{"instanceId": 123}
   - 返回：InstanceRecord（powerjob.Storage 模型）
+
+在线日志上报（已内置）
+-------------------
+- 后台周期性将通过 Worker.Log(...) 推入的日志批量上报到 `/server/reportLog`。
+- 配置项：`Options.LogReportEvery`（默认 10s）、`Options.LogBatchSize`（默认 256）。
+- 使用：在处理器里拿到 `*powerjob.Worker` 后，调用 `w.Log(instanceID, level, content, timeMs)`；若 `timeMs=0` 则自动取当前时间。level：1=DEBUG, 2=INFO, 3=WARN, 4=ERROR。
 
 五、Options 字段说明
 ----------------
@@ -186,6 +216,29 @@ type Storage interface {
 
 > 组件仅依赖这些最小能力；你可以替换为任意实现（例如另外的 ORM/DAO/远程存储）。
 
+七（增补）、开启内置 HTTP Server（可选）
+-----------------------------
+
+除了把 Handler 挂到你自己的 Server，你也可以直接让组件创建并监听一个端口：
+
+```go
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+w := powerjob.NewWorker(store, opt, nil)
+
+// 传入 "127.0.0.1:0" 让系统分配随机端口，base 留空则默认 "/worker"
+srv, actualAddr, err := w.StartHTTP(ctx, ":27777", "/worker")
+if err != nil { panic(err) }
+fmt.Println("listening at", actualAddr)
+
+// ctx 结束时将优雅关闭：_ = srv.Shutdown(...)
+```
+
+说明：
+- `StartHTTP` 返回 `*http.Server` 与实际监听地址（当传 `:0` 时用于得知随机端口）。
+- 仍需调用 `w.Start(ctx)` 来启动服务发现/心跳/状态上报（或你也可以先 `Start` 后 `StartHTTP`，顺序不限）。
+
 七、日志门面
 ----------
 
@@ -198,9 +251,36 @@ type Storage interface {
 
 - 接口：`processor.Processor`
   - `Init(ctx)`—可选初始化；`Run(ctx, params)`—执行；`Stop(ctx)`—响应停止
-- 注册：`processor.Register("yourName", yourProcessor)`，控制台中的 `processorInfo` 与此名称对应
+- 注册：`processor.Register("yourName", yourProcessor)`
+  - 红线：控制台中的 `processorInfo` 必须与 Register 使用的名称“完全一致（区分大小写）”。
+    - 例如：控制台填 `order.settle.v1`，则在代码中必须 `processor.Register("order.settle.v1", impl)`。
 - 参数：`jobParams` 为字符串 JSON，组件会解成 `map[string]any`
 - 幂等：同一 `instanceId` 触发的重复 `runJob` 将直接返回 200（已在执行/已完成）
+
+参数强类型绑定（使用原始字节）
+----------------------------
+
+- 组件调用你的处理器时，会把原始 JSON 作为 `[]byte` 传入 `Run(ctx, raw []byte)`。
+- 你在处理器内自行 `json.Unmarshal(raw, &YourStruct)` 完成强类型绑定。
+
+示例
+```go
+type MyParams struct {
+  SleepMS int64  `json:"sleepMS"`
+  Message string `json:"message,omitempty"`
+}
+
+type MyProcessor struct{}
+func (p *MyProcessor) Init(ctx context.Context) error { return nil }
+func (p *MyProcessor) Stop(ctx context.Context) error { return nil }
+
+func (p *MyProcessor) Run(ctx context.Context, raw []byte) (processor.Result, error) {
+  var mp MyParams
+  _ = json.Unmarshal(raw, &mp)
+  if mp.SleepMS <= 0 { mp.SleepMS = 100 }
+  return processor.Result{Code: 0, Msg: "ok"}, nil
+}
+```
 
 九、测试与构建
 ------------
